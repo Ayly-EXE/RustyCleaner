@@ -139,7 +139,7 @@ fn main() {
 
     let file_size = size_handle.join().unwrap();
 
-    println!("\n\nResults:");
+    println!("Results:");
     for (key, paths) in &file_map {
         println!("\n[{}]:", key);
         for path in paths {

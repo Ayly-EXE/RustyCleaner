@@ -6,8 +6,16 @@ use std::time::Duration;
 use clap::Parser;
 use fs_extra::dir::get_size;
 
-static TARGETS: [&str; 4] = ["target", ".embuild", "venv", ".env"];
-
+static TARGETS: [&str; 12] = [
+    "target",
+    ".embuild",
+    "venv", ".venv", "env", ".env",
+    "node_modules",
+    "__pycache__",
+    "_build", "deps",
+    "vendor",
+    "dist",
+];
 #[derive(Parser)]
 struct Cli {
     path: Option<PathBuf>,

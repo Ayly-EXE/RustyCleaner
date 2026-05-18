@@ -9,10 +9,10 @@ use crossterm::event::{Event, KeyCode};
 use fs_extra::dir::get_size;
 use ratatui::Frame;
 use ratatui::layout::Constraint::{Fill, Length};
-use ratatui::layout::Layout;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::layout::{Constraint, Layout, Margin};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear};
 
 
 //  TODO :
@@ -117,6 +117,8 @@ fn lookup(file_map: &mut HashMap<String, Vec<PathBuf>>, path: &Path) {
 }
 
 fn format_size(size: f32) -> String {
+    let size = size.max(0.0);
+
     if size > 1_073_741_824.0 {
         format!("[{:>10.2} GB]", size / 1_073_741_824.0)
     } else if size > 1_048_576.0 {
@@ -187,6 +189,12 @@ fn build_list_items<'a>(
     items
 }
 
+fn delete_selected(to_delete: &Vec<PathBuf>) {
+    for path in to_delete {
+        fs::remove_dir_all(path).unwrap();
+    }
+}
+
 fn render(
     frame: &mut Frame,
     file_map: &HashMap<String, Vec<PathBuf>>,
@@ -197,6 +205,8 @@ fn render(
     selection: &Selection,
     to_delete: &Vec<PathBuf>,
     to_delete_size:f32,
+    confirm:bool,
+    confirm_choice:bool,
 ) {
     let bg = Block::default().style(Style::default().bg(Color::Rgb(22, 27, 51)));
 
@@ -234,15 +244,13 @@ fn render(
         .block(selection_box)
         .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         .highlight_symbol(">> ");
-    
-    
+
+
     let free_space = Text::from(vec![
-        Line::from(format!("TOTAL RECLAIMED SPACE : {}", format_size(to_delete_size))),
+        Line::from(format!("TOTAL SPACE TO RECLAIM : {}", format_size(to_delete_size))),
         Line::from(format!("{} FOLDERS SELECTED", to_delete.len()))
     ]
     );
-    
-    
 
     let free_space_text = Paragraph::new(free_space)
         .style(Style::default().fg(Color::Rgb(229, 229, 229)).add_modifier(Modifier::BOLD))
@@ -250,10 +258,60 @@ fn render(
 
     frame.render_widget(bg, frame.area());
     frame.render_widget(outside_box, outer_layer);
+
+
     frame.render_widget(top_text, top_layer);
     frame.render_stateful_widget(list, selection_layer, list_state);
     frame.render_widget(free_space_text,confirm_layer);
 
+    if confirm{
+        let centered_area = inner_area.centered(Constraint::Length(50), Constraint::Length(10));
+        frame.render_widget(Clear, centered_area);
+
+        let popup_block = Block::bordered().title("Confirmation").bg(Color::Rgb(22, 27, 51));
+
+        let [confirm_text_area, confirm_select_area] = Layout::vertical([Fill(1),Fill(1)]).areas(centered_area.inner(Margin::new(1,1)));
+
+
+        let confirm_paragraph = Text::from(vec![
+            Line::from("DELETE THE SELECTED DIRECTORIES ?"),
+            Line::from(format!("{} FOLDERS SELECTED / {} TO FREE", to_delete.len(), format_size(to_delete_size))),
+        ]
+        ).centered();
+
+        let [yes_selection, no_selection] = Layout::horizontal([Fill(1), Fill(1)]).areas(confirm_select_area);
+
+
+        let (yes_style, no_style) = if confirm_choice {
+            (
+                Style::default().fg(Color::White).bg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD),
+            )
+        };
+
+        let yes_button = Paragraph::new("YES")
+            .centered()
+            .style(yes_style)
+            .block(Block::bordered());
+
+        let no_button = Paragraph::new("NO")
+            .centered()
+            .style(no_style)
+            .block(Block::bordered());
+
+
+
+        frame.render_widget(popup_block, centered_area);
+        frame.render_widget(confirm_paragraph, confirm_text_area);
+        frame.render_widget(yes_button,yes_selection);
+        frame.render_widget(no_button,no_selection);
+
+    }
 }
 
 fn run_app(
@@ -267,6 +325,9 @@ fn run_app(
     let mut is_expanded = false;
     let mut selection = Selection::Category(0);
 
+    let mut confirm = false;
+
+    let mut confirm_choice = false;
 
 
     loop {
@@ -291,7 +352,9 @@ fn run_app(
             is_expanded,
             &selection,
             to_delete,
-            to_delete_size
+            to_delete_size,
+            confirm,
+            confirm_choice
         ))?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -299,75 +362,112 @@ fn run_app(
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
 
-                    KeyCode::Right => is_expanded = true,
-                    KeyCode::Left => {
-                        match &selection {
-                            Selection::Path(i, _) => selection = Selection::Category(*i),
-                            Selection::Category(_) => is_expanded = false,
+                    KeyCode::Right => {
+                        if !confirm {
+                            is_expanded = true
                         }
+                        else { confirm_choice = false }
+                    }
+
+                    KeyCode::Left => {
+                        if !confirm {
+                            match &selection {
+                                Selection::Path(i, _) => selection = Selection::Category(*i),
+                                Selection::Category(_) => is_expanded = false,
+                            }
+                        }
+                        else { confirm_choice = true }
                     }
 
                     KeyCode::Down => {
-                        match &selection {
-                            Selection::Category(i) => {
-                                if is_expanded {
-                                    selection = Selection::Path(*i, 0);
-                                } else {
-                                    selection = Selection::Category((i + 1).min(keys.len() - 1));
+                        if !confirm {
+                            match &selection {
+                                Selection::Category(i) => {
+                                    if is_expanded {
+                                        selection = Selection::Path(*i, 0);
+                                    } else {
+                                        selection = Selection::Category((i + 1).min(keys.len() - 1));
+                                    }
                                 }
-                            }
-                            Selection::Path(i, j) => {
-                                let paths_len = file_map[keys[*i]].len();
-                                if j + 1 < paths_len {
-                                    selection = Selection::Path(*i, j + 1);
-                                } else {
-                                    selection = Selection::Category((i + 1).min(keys.len() - 1));
-                                    is_expanded = false;
+                                Selection::Path(i, j) => {
+                                    let paths_len = file_map[keys[*i]].len();
+                                    if j + 1 < paths_len {
+                                        selection = Selection::Path(*i, j + 1);
+                                    } else {
+                                        selection = Selection::Category((i + 1).min(keys.len() - 1));
+                                        is_expanded = false;
+                                    }
                                 }
                             }
                         }
                     }
 
                     KeyCode::Up => {
-                        match &selection {
-                            Selection::Category(i) => {
-                                selection = Selection::Category(i.saturating_sub(1));
-                            }
-                            Selection::Path(i, j) => {
-                                if *j == 0 {
-                                    selection = Selection::Category(*i);
-                                } else {
-                                    selection = Selection::Path(*i, j - 1);
+                        if !confirm {
+                            match &selection {
+                                Selection::Category(i) => {
+                                    selection = Selection::Category(i.saturating_sub(1));
+                                }
+                                Selection::Path(i, j) => {
+                                    if *j == 0 {
+                                        selection = Selection::Category(*i);
+                                    } else {
+                                        selection = Selection::Path(*i, j - 1);
+                                    }
                                 }
                             }
                         }
                     }
 
                     KeyCode::Tab => {
-                        match &selection {
-                            Selection::Category(i) => {
-                                selection = Selection::Category((i + 1) % keys.len());
+                        if !confirm {
+                            match &selection {
+                                Selection::Category(i) => {
+                                    selection = Selection::Category((i + 1) % keys.len());
+                                }
+                                _ => {}
                             }
-                            _ => {}
                         }
-
                     }
 
                     KeyCode::Char(' ') => {
-                        match &selection {
-                            Selection::Path(i, j) => {
-                                let mut keys: Vec<&String> = file_map.keys().collect();
-                                keys.sort();
-                                let path = file_map[keys[*i]][*j].clone();
+                        if !confirm {
+                            match &selection {
+                                Selection::Path(i, j) => {
+                                    let mut keys: Vec<&String> = file_map.keys().collect();
+                                    keys.sort();
+                                    let path = file_map[keys[*i]][*j].clone();
 
-                                if to_delete.contains(&path) {
-                                    to_delete.retain(|p| p != &path);
-                                } else {
-                                    to_delete.push(path);
+                                    if to_delete.contains(&path) {
+                                        to_delete.retain(|p| p != &path);
+                                    } else {
+                                        to_delete.push(path);
+                                    }
                                 }
+                                Selection::Category(_) => {}
                             }
-                            Selection::Category(_) => {}
                         }
+                        else {
+                            if confirm_choice {
+                                delete_selected(to_delete);
+                                return Ok(())
+                            }
+                            else {
+                                confirm = false
+                            }
+                        }
+                    }
+
+                    KeyCode::Enter => if confirm_choice {
+                        delete_selected(to_delete);
+                        return Ok(())
+                    }
+                    else {
+                        confirm = false
+                    }
+
+                    KeyCode::Char('d') => {
+                        confirm = !confirm;
                     }
 
                     _ => {}

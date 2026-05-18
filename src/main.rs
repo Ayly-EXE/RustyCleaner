@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 use clap::Parser;
 use crossterm::event;
-use crossterm::event::{Event, KeyCode};
+use crossterm::event::{Event, KeyCode, KeyEventKind};
 use fs_extra::dir::get_size;
 use ratatui::Frame;
 use ratatui::layout::Constraint::{Fill, Length};
@@ -13,16 +13,6 @@ use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear};
-
-
-//  TODO :
-//  - todo with tab - DONE
-//  - todo make a mew tab with Delete X files and save [xxx] yB
-//  - todo with delete with confirmation
-//  - todo helper at the bottom with commands
-//  - todo if possible remove scan complete, or make it into the tui app (not sure yet)
-//  - todo clean up if possible in multiple files
-
 
 enum Selection {
     Category(usize),
@@ -359,6 +349,9 @@ fn run_app(
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
 

@@ -1,6 +1,9 @@
+mod utils;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use clap::Parser;
@@ -12,7 +15,7 @@ use ratatui::layout::Constraint::{Fill, Length};
 use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Text};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear, Gauge};
 
 enum Selection {
     Category(usize),
@@ -179,11 +182,6 @@ fn build_list_items<'a>(
     items
 }
 
-fn delete_selected(to_delete: &Vec<PathBuf>) {
-    for path in to_delete {
-        fs::remove_dir_all(path).unwrap();
-    }
-}
 
 fn render(
     frame: &mut Frame,
@@ -197,14 +195,39 @@ fn render(
     to_delete_size:f32,
     confirm:bool,
     confirm_choice:bool,
+    deleted:i32
 ) {
     let bg = Block::default().style(Style::default().bg(Color::Rgb(22, 27, 51)));
 
     let [outer_layer] = Layout::vertical([Fill(1)]).areas(frame.area());
 
+    let instructions = if confirm {
+        Line::from(vec![
+            " Navigate ".into(),
+            "<←/→>".blue().bold(),
+            " Confirm ".into(),
+            "<ENTER>".blue().bold(),
+            " Cancel ".into(),
+            "<d>".blue().bold(),
+        ])
+    } else {
+        Line::from(vec![
+            " Move ".into(),
+            "<↑/↓>".blue().bold(),
+            " SubMenu ".into(),
+            "<←/→>".blue().bold(),
+            " Select ".into(),
+            "<SPACE>".blue().bold(),
+            " Delete ".into(),
+            "<d>".blue().bold(),
+            " Quit ".into(),
+            "<q>".blue().bold(),
+        ])
+    };
     let outside_box = Block::default()
         .title("Rusty Cleaner v0.2.1")
-        .title_style(Style::default().fg(Color::Rgb(158, 42, 43)));
+        .title_style(Style::default().fg(Color::Rgb(158, 42, 43)))
+        .title_bottom(instructions.centered());
 
     let inner_area = outside_box.inner(outer_layer);
     let [top_layer, selection_layer, confirm_layer] = Layout::vertical([Length(3), Fill(10), Length(5)]).areas(inner_area);
@@ -260,7 +283,7 @@ fn render(
 
         let popup_block = Block::bordered().title("Confirmation").bg(Color::Rgb(22, 27, 51));
 
-        let [confirm_text_area, confirm_select_area] = Layout::vertical([Fill(1),Fill(1)]).areas(centered_area.inner(Margin::new(1,1)));
+        let [confirm_text_area,loading, confirm_select_area] = Layout::vertical([Fill(2),Fill(1),Fill(2)]).areas(centered_area.inner(Margin::new(1,1)));
 
 
         let confirm_paragraph = Text::from(vec![
@@ -294,7 +317,19 @@ fn render(
             .style(no_style)
             .block(Block::bordered());
 
-
+        if deleted >= 0{
+            let loading_bar = Gauge::default()
+                .block(Block::bordered().title(format!(
+                    "Deleting... {}/{}", deleted, to_delete.len()
+                )))
+                .gauge_style(Style::new().white().on_black().italic())
+                .percent(if to_delete.is_empty() {
+                    0
+                } else {
+                    (deleted * 100 / to_delete.len() as i32) as u16
+                });
+            frame.render_widget(loading_bar, loading);
+        }
 
         frame.render_widget(popup_block, centered_area);
         frame.render_widget(confirm_paragraph, confirm_text_area);
@@ -319,6 +354,7 @@ fn run_app(
 
     let mut confirm_choice = false;
 
+    let mut deleted= -1; // Set to minus one so I dont need to pass an other var to render to activate it. Simply pass it to 0
 
     loop {
 
@@ -344,7 +380,8 @@ fn run_app(
             to_delete,
             to_delete_size,
             confirm,
-            confirm_choice
+            confirm_choice,
+            deleted
         ))?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -440,19 +477,53 @@ fn run_app(
                                 Selection::Category(_) => {}
                             }
                         }
-                        else {
-                            if confirm_choice {
-                                delete_selected(to_delete);
-                                return Ok(())
-                            }
-                            else {
-                                confirm = false
-                            }
-                        }
                     }
 
-                    KeyCode::Enter => if confirm_choice {
-                        delete_selected(to_delete);
+                    KeyCode::Enter => if confirm {
+
+                        // TODO : FIX THIS AND USE MPSC CHANNEL AND THREAD TO MOVE TO DELETE (TX/RX)
+                        // TODO : DELETE takes the whole vec!
+                        // TODO : SENDS BACK A BIT WHEN ONE IS DELETED
+
+                        deleted = 0;
+
+                        let (del_tx, del_rx) = mpsc::channel::<u8>();
+
+                        let paths = to_delete.clone();
+
+                        let _ = thread::spawn(move || {
+                            for path in paths{
+                                fs::remove_dir_all(path).unwrap();
+                                del_tx.send(1).unwrap();
+                            }
+                        });
+
+
+
+                        while deleted < to_delete.len() as i32 {
+
+                            while let Ok(_) = del_rx.try_recv() {
+                                deleted += 1;
+                            }
+
+                            terminal.draw(|frame| render(
+                                frame,
+                                file_map,
+                                category_size,
+                                file_size,
+                                &mut list_state,
+                                is_expanded,
+                                &selection,
+                                to_delete,
+                                to_delete_size,
+                                confirm,
+                                confirm_choice,
+                                deleted
+                            ))?;
+
+                            thread::sleep(Duration::from_millis(16));
+                        }
+
                         return Ok(())
                     }
                     else {

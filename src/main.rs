@@ -2,7 +2,7 @@ mod utils;
 
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -16,112 +16,20 @@ use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Text};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear, Gauge};
+use utils::{format_size,lookup};
 
 enum Selection {
     Category(usize),
     Path(usize, usize),
 }
 
-static TARGETS: [&str; 11] = [
-    "target",
-    ".embuild",
-    "venv", ".venv", "env", ".env",
-    "node_modules",
-    "_build", "deps",
-    "vendor",
-    "dist",
-];
-
 #[derive(Parser)]
 struct Cli {
     path: Option<PathBuf>,
 }
 
-fn detect_language(entry_path: &Path, file_name: &str) -> Option<&'static str> {
-    let parent = entry_path.parent();
-    let has = |f: &str| parent.map(|p| p.join(f).exists()).unwrap_or(false);
 
-    match file_name {
-        "node_modules"  => Some("JavaScript"),
-        "__pycache__"   => Some("Python"),
-        "_build" | "deps" => Some("Elixir"),
-        ".stack-work" | "dist-newstyle" => Some("Haskell"),
-        "Pods"          => Some("Swift"),
-        "target" => {
-            if      has("Cargo.toml")   { Some("Rust") }
-            else if has("pom.xml")      { Some("Java (Maven)") }
-            else if has("build.gradle") { Some("Java (Gradle)") }
-            else if has("build.sbt")    { Some("Scala") }
-            else                        { None }
-        }
-        "build" => {
-            if      has("build.gradle")  { Some("Java (Gradle)") }
-            else if has("Package.swift") { Some("Swift") }
-            else                         { None }
-        }
-        "venv" | "env" | ".venv" | ".env" => {
-            if entry_path.join("pyvenv.cfg").exists() { Some("Python") } else { None }
-        }
-        "vendor" => {
-            if      has("composer.json") { Some("PHP") }
-            else if has("Gemfile")       { Some("Ruby") }
-            else                         { None }
-        }
-        "dist" => {
-            if      has("package.json")  { Some("JavaScript") }
-            else if has("pyproject.toml") || has("setup.py") { Some("Python") }
-            else                         { None }
-        }
-        _ => None,
-    }
-}
 
-fn lookup(file_map: &mut HashMap<String, Vec<PathBuf>>, path: &Path) {
-    if !path.is_dir() {
-        return;
-    }
-
-    for entry in fs::read_dir(path).unwrap() {
-        let entry = entry.unwrap();
-        let entry_path = entry.path();
-
-        let file_name = match entry_path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-
-        let is_target = TARGETS.contains(&file_name);
-
-        if is_target && entry_path.is_dir() {
-            let key = detect_language(&entry_path, file_name)
-                .unwrap_or(file_name)
-                .to_string();
-            file_map
-                .entry(key)
-                .or_insert_with(Vec::new)
-                .push(entry_path.clone());
-            continue;
-        }
-
-        if entry_path.is_dir() {
-            lookup(file_map, &entry_path);
-        }
-    }
-}
-
-fn format_size(size: f32) -> String {
-    let size = size.max(0.0);
-
-    if size > 1_073_741_824.0 {
-        format!("[{:>10.2} GB]", size / 1_073_741_824.0)
-    } else if size > 1_048_576.0 {
-        format!("[{:>10.2} MB]", size / 1_048_576.0)
-    } else if size > 1_024.0 {
-        format!("[{:>10.2} KB]", size / 1_024.0)
-    } else {
-        format!("[{:>10.2} B ]", size)
-    }
-}
 
 fn to_flat_index(selection: &Selection) -> usize {
     match selection {
@@ -354,7 +262,7 @@ fn run_app(
 
     let mut confirm_choice = false;
 
-    let mut deleted= -1; // Set to minus one so I dont need to pass an other var to render to activate it. Simply pass it to 0
+    let mut deleted= -1; // Set to minus one, so I don't need to pass another var to render to activate it. Simply pass it to 0
 
     loop {
 
@@ -480,52 +388,54 @@ fn run_app(
                     }
 
                     KeyCode::Enter => if confirm {
+                        if confirm_choice {
+                            deleted = 0;
 
-                        // TODO : FIX THIS AND USE MPSC CHANNEL AND THREAD TO MOVE TO DELETE (TX/RX)
-                        // TODO : DELETE takes the whole vec!
-                        // TODO : SENDS BACK A BIT WHEN ONE IS DELETED
+                            let (del_tx, del_rx) = mpsc::channel::<u8>();
 
-                        deleted = 0;
+                            let paths = to_delete.clone();
 
-                        let (del_tx, del_rx) = mpsc::channel::<u8>();
+                            let _ = thread::spawn(move || {
+                                for path in paths{
+                                    fs::remove_dir_all(path).unwrap();
+                                    del_tx.send(1).unwrap();
+                                }
+                            });
 
-                        let paths = to_delete.clone();
 
-                        let _ = thread::spawn(move || {
-                            for path in paths{
-                                fs::remove_dir_all(path).unwrap();
-                                del_tx.send(1).unwrap();
+
+                            while deleted < to_delete.len() as i32 {
+
+                                while let Ok(_) = del_rx.try_recv() {
+                                    deleted += 1;
+                                }
+
+                                terminal.draw(|frame| render(
+                                    frame,
+                                    file_map,
+                                    category_size,
+                                    file_size,
+                                    &mut list_state,
+                                    is_expanded,
+                                    &selection,
+                                    to_delete,
+                                    to_delete_size,
+                                    confirm,
+                                    confirm_choice,
+                                    deleted
+                                ))?;
+
+                                thread::sleep(Duration::from_millis(16));
                             }
-                        });
 
-
-
-                        while deleted < to_delete.len() as i32 {
-
-                            while let Ok(_) = del_rx.try_recv() {
-                                deleted += 1;
-                            }
-
-                            terminal.draw(|frame| render(
-                                frame,
-                                file_map,
-                                category_size,
-                                file_size,
-                                &mut list_state,
-                                is_expanded,
-                                &selection,
-                                to_delete,
-                                to_delete_size,
-                                confirm,
-                                confirm_choice,
-                                deleted
-                            ))?;
-
-                            thread::sleep(Duration::from_millis(16));
+                            return Ok(())
+                        }
+                        else {
+                            confirm = false
                         }
 
-                        return Ok(())
                     }
+
                     else {
                         confirm = false
                     }

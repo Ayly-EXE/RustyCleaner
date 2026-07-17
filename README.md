@@ -33,6 +33,7 @@ The tool do not delete source files, only builds and packages.
 - dist
 
 ## Usage 
+/!\ It is highly recommended to use your dev folder as a starting point for the scan. 
 ```shell
 rusty_clean <path>
 ```
